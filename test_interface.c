@@ -7,6 +7,7 @@
 #include <signal.h>
 #include <time.h>
 #include <fcntl.h>
+#include "test_interface.h"
 
 #define CLEAR_SCREEN "\033[2J"
 #define CURSOR_HOME "\033[H"
@@ -25,6 +26,7 @@ float current_temp = 20.0; // Starting temperature
 float last_update_time = 0.0;
 int window_changed = 0;
 int first_run = 1;
+struct time *t = NULL;
 
 // Mock temperature reading (simulates sensor with realistic temperature changes)
 float read_temperature(void)
@@ -68,6 +70,16 @@ void setup_terminal(void)
     new_termios = old_termios;
     new_termios.c_lflag &= ~(ICANON | ECHO);
     tcsetattr(STDIN_FILENO, TCSANOW, &new_termios);
+    t = malloc(sizeof(struct time));
+    if (!t)
+    {
+        perror("failed to allocate time buffer");
+    }
+    // Initialize time values to zero
+    t->days = 0;
+    t->hours = 0;
+    t->minutes = 0;
+    t->seconds = 0;
     printf(HIDE_CURSOR);
 }
 
@@ -75,6 +87,7 @@ void restore_terminal(void)
 {
     printf(SHOW_CURSOR);
     tcsetattr(STDIN_FILENO, TCSANOW, &old_termios);
+    free(t);
 }
 
 void get_terminal_size(void)
@@ -85,6 +98,35 @@ void get_terminal_size(void)
     term_cols = w.ws_col;
 }
 
+// Add this function to calculate total seconds and percentage
+float calculate_timer_percentage(struct time *t)
+{
+    // Calculate total seconds in the timer
+    int total_seconds = t->seconds + (t->minutes * 60) + (t->hours * 3600) + (t->days * 86400);
+
+    // Store initial total if not set yet
+    static int initial_total = 0;
+    if (initial_total == 0 && total_seconds > 0)
+    {
+        initial_total = total_seconds;
+    }
+
+    // Reset initial_total if timer is done
+    if (total_seconds == 0)
+    {
+        initial_total = 0;
+        return 0.0;
+    }
+
+    // Calculate percentage remaining
+    if (initial_total > 0)
+    {
+        return (float)total_seconds / initial_total;
+    }
+
+    return 0.0;
+}
+
 void draw_interface(float current_temp, float desired_temp, int is_heating)
 {
     get_terminal_size();
@@ -92,7 +134,7 @@ void draw_interface(float current_temp, float desired_temp, int is_heating)
     // Use full terminal dimensions with small margin
     int box_width = term_cols - 4;  // Leave 2 character margin on each side
     int box_height = term_rows - 2; // Leave 1 character margin top and bottom
-    int start_col = 2;              // Start 2 characters from left
+    int start_col = 3;              // Start 2 characters from left
     int start_row = 1;              // Start 1 character from top
 
     // Clear screen and move to starting position
@@ -110,8 +152,8 @@ void draw_interface(float current_temp, float desired_temp, int is_heating)
     printf("║%*s%*s║", box_width - 2, "", 0, "");
     printf(MOVE_TO(% d, % d), start_row + 2, start_col);
     printf("║%*sTEMP CONTROL%*s║",
-           (box_width - 12) / 2, "",
-           (box_width - 15 + 1) / 2, "");
+           (box_width) / 2 - 6, "",
+           (box_width - 1) / 2 - 7, "");
     printf(MOVE_TO(% d, % d), start_row + 3, start_col);
     printf("║%*s%*s║", box_width - 2, "", 0, "");
 
@@ -151,7 +193,8 @@ void draw_interface(float current_temp, float desired_temp, int is_heating)
     printf("║%*sHeater Status: %s%*s║",
            stats_margin, "",
            is_heating ? "ON 🔥" : "OFF ❄️",
-           box_width - (stats_margin + stats_width) + 8, "");
+           is_heating ? (box_width - (stats_margin + stats_width) + 8) : (box_width - (stats_margin + stats_width) + 7), "");
+
     printf(MOVE_TO(% d, % d), start_row + 11, start_col);
     printf("║%*s%*s║", box_width - 2, "", 0, "");
 
@@ -169,15 +212,69 @@ void draw_interface(float current_temp, float desired_temp, int is_heating)
         printf("║%*s║", box_width - 2, "");
     }
 
+    printf(MOVE_TO(% d, % d), start_row + 13, start_col);
+    printf("║%*sTIME REMAINING:%*s║",
+           (box_width) / 2 - 8, "",
+           (box_width - 1) / 2 - 8, "");
+
+    printf(MOVE_TO(% d, % d), start_row + 14, start_col);
+    printf("║%*sDays    Hours    Minutes    Seconds%*s║",
+           (box_width) / 2 - 17, "",
+           (box_width - 1) / 2 - 19, "");
+
+    printf(MOVE_TO(% d, % d), start_row + 15, start_col);
+    printf("║%*s %2d      %2d       %2d        %2d    %*s║",
+           (box_width) / 2 - 18, "",
+           t->days, t->hours, t->minutes, t->seconds,
+           (box_width - 1) / 2 - 17, "");
+
+    // Add loading bar
+    int bar_width = box_width - 10; // Leave some margin
+    float percentage = calculate_timer_percentage(t);
+    int filled_width = (int)(percentage * bar_width);
+
+    printf(MOVE_TO(% d, % d), start_row + 16, start_col);
+    printf("║%*s[", (box_width - bar_width) / 2 - 1, "");
+
+    for (int i = 0; i < bar_width; i++)
+    {
+        if (i < filled_width)
+        {
+            printf("█");
+        }
+        else
+        {
+            printf(" ");
+        }
+    }
+
+    printf("]%*s║", (box_width - bar_width) / 2 - 3, "");
+
+    // Add percentage text below bar
+    printf(MOVE_TO(% d, % d), start_row + 17, start_col);
+    printf("║%*s%06.2f%% remaining%*s║",
+           (box_width) / 2 - 8, "",
+           percentage * 100, // Ensure percentage is multiplied by 100
+           (box_width - 1) / 2 - 10, "");
+
     // Draw controls at the bottom
+    printf(MOVE_TO(% d, % d), start_row + box_height - 6, start_col);
+    printf("╠");
+    for (int i = 0; i < box_width - 2; i++)
+        printf("═");
+    printf("╣");
+
     printf(MOVE_TO(% d, % d), start_row + box_height - 3, start_col);
+    printf("║%*sPress 't' to set new timer%*s║",
+           1, "", box_width - 29, "");
+
+    printf(MOVE_TO(% d, % d), start_row + box_height - 4, start_col);
     printf("║%*sPress 'q' to quit%*s║",
-           ((box_width) / 2) - 9, "",
-           ((box_width) / 2) - 10, "");
+           1, "", box_width - 20, "");
+
     printf(MOVE_TO(% d, % d), start_row + box_height - 2, start_col);
     printf("║%*sPress 's' to set new temperature%*s║",
-           (box_width - 31) / 2, "",
-           ((box_width) / 2) - 18, "");
+           1, "", box_width - 35, "");
 
     // Draw bottom border
     printf(MOVE_TO(% d, % d), start_row + box_height - 1, start_col);
@@ -195,7 +292,7 @@ void update_values(float current_temp, float desired_temp, int is_heating)
 
     int box_width = term_cols - 4;                    // Leave 2 character margin on each side
     int box_height = term_rows - 2;                   // Leave 1 character margin top and bottom
-    int start_col = 2;                                // Start 2 characters from left
+    int start_col = 3;                                // Start 2 characters from left
     int start_row = 1;                                // Start 1 character from top
     int stats_width = 30;                             // Width of the longest stat line
     int stats_margin = (box_width - stats_width) / 2; // Center the stats block
@@ -224,6 +321,42 @@ void update_values(float current_temp, float desired_temp, int is_heating)
            stats_margin, "",
            is_heating ? "ON 🔥" : "OFF ❄️",
            is_heating ? (box_width - (stats_margin + stats_width) + 8) : (box_width - (stats_margin + stats_width) + 7), "");
+
+    // Update timer display
+    printf(MOVE_TO(% d, % d), start_row + 15, start_col);
+    printf("║%*s %2d      %2d       %2d        %2d    %*s║",
+           (box_width) / 2 - 18, "",
+           t->days, t->hours, t->minutes, t->seconds,
+           (box_width - 1) / 2 - 17, "");
+
+    // Update loading bar
+    int bar_width = box_width - 10;
+    float percentage = calculate_timer_percentage(t);
+    int filled_width = (int)(percentage * bar_width);
+
+    printf(MOVE_TO(% d, % d), start_row + 16, start_col);
+    printf("║%*s[", (box_width - bar_width) / 2 - 1, "");
+
+    for (int i = 0; i < bar_width; i++)
+    {
+        if (i < filled_width)
+        {
+            printf("█");
+        }
+        else
+        {
+            printf(" ");
+        }
+    }
+
+    printf("]%*s║", (box_width - bar_width) / 2 - 3, "");
+
+    // Update percentage text
+    printf(MOVE_TO(% d, % d), start_row + 17, start_col);
+    printf("║%*s%06.2f%% remaining%*s║",
+           (box_width) / 2 - 8, "",
+           percentage * 100, // Ensure percentage is multiplied by 100
+           (box_width - 1) / 2 - 10, "");
 
     fflush(stdout);
 }
@@ -261,6 +394,47 @@ void set_new_temperature(void)
     fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
 
     printf(HIDE_CURSOR);
+}
+
+void set_timer()
+{
+    // Temporarily restore canonical mode for input and make stdin blocking again
+    tcsetattr(STDIN_FILENO, TCSANOW, &old_termios);
+
+    // Remove non-blocking flag from stdin
+    int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+    fcntl(STDIN_FILENO, F_SETFL, flags & ~O_NONBLOCK);
+
+    printf(CLEAR_SCREEN CURSOR_HOME);
+    printf("Enter time to run D:H:M:S (e.g., 0:1:30:0 for 1 hour and 30 minutes): ");
+    printf(SHOW_CURSOR);
+
+    char input[32];
+
+    // Read the new time values
+    if (fgets(input, sizeof(input), stdin) != NULL)
+    {
+        if (sscanf(input, "%d:%d:%d:%d", &t->days, &t->hours, &t->minutes, &t->seconds) != 4)
+        {
+            // If input format is incorrect, set default values
+            t->days = 0;
+            t->hours = 0;
+            t->minutes = 0;
+            t->seconds = 0;
+        }
+    }
+
+    // Restore non-canonical mode
+    tcsetattr(STDIN_FILENO, TCSANOW, &new_termios);
+
+    // Set stdin back to non-blocking
+    flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+    fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
+
+    printf(HIDE_CURSOR);
+
+    // Reset the timer percentage calculation when setting a new timer
+    calculate_timer_percentage(t);
 }
 
 // Signal handler for Ctrl+C
@@ -312,6 +486,45 @@ int main(void)
             update_values(current_temp, desired_temp, is_heating);
         }
 
+        // Update timer if it's running
+        if (t->days > 0 || t->hours > 0 || t->minutes > 0 || t->seconds > 0)
+        {
+            static time_t last_second = 0;
+            time_t current_time = time(NULL);
+
+            if (current_time > last_second)
+            {
+                last_second = current_time;
+
+                // Decrement timer
+                if (t->seconds > 0)
+                {
+                    t->seconds--;
+                }
+                else if (t->minutes > 0)
+                {
+                    t->minutes--;
+                    t->seconds = 59;
+                }
+                else if (t->hours > 0)
+                {
+                    t->hours--;
+                    t->minutes = 59;
+                    t->seconds = 59;
+                }
+                else if (t->days > 0)
+                {
+                    t->days--;
+                    t->hours = 23;
+                    t->minutes = 59;
+                    t->seconds = 59;
+                }
+
+                // Force update of display
+                update_values(current_temp, desired_temp, is_heating);
+            }
+        }
+
         last_current_temp = current_temp;
         last_desired_temp = desired_temp;
         last_heating_state = is_heating;
@@ -329,6 +542,11 @@ int main(void)
             {
                 set_new_temperature();
                 first_run = 1; // Redraw full screen after temperature input
+            }
+            else if (c == 't' || c == 'T')
+            {
+                set_timer();
+                first_run = 1;
             }
         }
 
